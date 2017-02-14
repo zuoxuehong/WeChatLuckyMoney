@@ -1,6 +1,7 @@
 package xyz.monkeytong.hongbao.services;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.GestureDescription;
 import android.app.Notification;
 import android.app.PendingIntent;
 import android.content.ComponentName;
@@ -9,37 +10,36 @@ import android.content.pm.PackageManager;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Parcelable;
+import android.graphics.Path;
 import android.preference.PreferenceManager;
 import android.util.Log;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.util.DisplayMetrics;
 import xyz.monkeytong.hongbao.utils.HongbaoSignature;
 import xyz.monkeytong.hongbao.utils.PowerUtil;
 
 import java.util.List;
-
-import xyz.monkeytong.hongbao.utils.HongbaoSignature;
-import xyz.monkeytong.hongbao.utils.PowerUtil;
-
 
 public class HongbaoService extends AccessibilityService implements SharedPreferences.OnSharedPreferenceChangeListener {
     private static final String WECHAT_DETAILS_EN = "Details";
     private static final String WECHAT_DETAILS_CH = "红包详情";
     private static final String WECHAT_BETTER_LUCK_EN = "Better luck next time!";
     private static final String WECHAT_BETTER_LUCK_CH = "手慢了";
-    private static final String WECHAT_EXPIRES_CH = "红包已失效";
+    private static final String WECHAT_EXPIRES_CH = "已超过24小时";
     private static final String WECHAT_VIEW_SELF_CH = "查看红包";
     private static final String WECHAT_VIEW_OTHERS_CH = "领取红包";
     private static final String WECHAT_NOTIFICATION_TIP = "[微信红包]";
     private static final String WECHAT_LUCKMONEY_RECEIVE_ACTIVITY = "LuckyMoneyReceiveUI";
     private static final String WECHAT_LUCKMONEY_DETAIL_ACTIVITY = "LuckyMoneyDetailUI";
     private static final String WECHAT_LUCKMONEY_GENERAL_ACTIVITY = "LauncherUI";
+    private static final String WECHAT_LUCKMONEY_CHATTING_ACTIVITY = "ChattingUI";
     private String currentActivityName = WECHAT_LUCKMONEY_GENERAL_ACTIVITY;
 
     private AccessibilityNodeInfo rootNodeInfo, mReceiveNode, mUnpackNode;
     private boolean mLuckyMoneyPicked, mLuckyMoneyReceived;
     private int mUnpackCount = 0;
-    private boolean mMutex = false, mListMutex = false;
+    private boolean mMutex = false, mListMutex = false, mChatMutex = false;
     private HongbaoSignature signature = new HongbaoSignature();
 
     private PowerUtil powerUtil;
@@ -63,7 +63,11 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
             mListMutex = false;
         }
 
-        if (sharedPreferences.getBoolean("pref_watch_chat", false)) watchChat(event);
+        if (!mChatMutex) {
+            mChatMutex = true;
+            if (sharedPreferences.getBoolean("pref_watch_chat", false)) watchChat(event);
+            mChatMutex = false;
+        }
     }
 
     private void watchChat(AccessibilityEvent event) {
@@ -91,7 +95,7 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
                     new Runnable() {
                         public void run() {
                             try {
-                                mUnpackNode.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                                openPacket();
                             } catch (Exception e) {
                                 mMutex = false;
                                 mLuckyMoneyPicked = false;
@@ -100,6 +104,42 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
                         }
                     },
                     delayFlag);
+        }
+    }
+
+    private void openPacket() {
+        DisplayMetrics metrics = getResources().getDisplayMetrics();
+        float dpi = metrics.density;
+        if (android.os.Build.VERSION.SDK_INT <= 23) {
+            mUnpackNode.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        } else {
+            if (android.os.Build.VERSION.SDK_INT > 23) {
+
+                Path path = new Path();
+                if (640 == dpi) {
+                    path.moveTo(720, 1575);
+                } else {
+                    path.moveTo(540, 1060);
+                }
+                GestureDescription.Builder builder = new GestureDescription.Builder();
+                GestureDescription gestureDescription = builder.addStroke(new GestureDescription.StrokeDescription(path, 450, 50)).build();
+                dispatchGesture(gestureDescription, new GestureResultCallback() {
+                    @Override
+                    public void onCompleted(GestureDescription gestureDescription) {
+                        Log.d("test", "onCompleted");
+                        mMutex = false;
+                        super.onCompleted(gestureDescription);
+                    }
+
+                    @Override
+                    public void onCancelled(GestureDescription gestureDescription) {
+                        Log.d("test", "onCancelled");
+                        mMutex = false;
+                        super.onCancelled(gestureDescription);
+                    }
+                }, null);
+
+            }
         }
     }
 
@@ -134,6 +174,7 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
         //避免当订阅号中出现标题为“[微信红包]拜年红包”（其实并非红包）的信息时误判
         if (!nodes.isEmpty() && currentActivityName.contains(WECHAT_LUCKMONEY_GENERAL_ACTIVITY)) {
             AccessibilityNodeInfo nodeToClick = nodes.get(0);
+            if (nodeToClick == null) return false;
             CharSequence contentDescription = nodeToClick.getContentDescription();
             if (contentDescription != null && !signature.getContentDescription().equals(contentDescription)) {
                 nodeToClick.performAction(AccessibilityNodeInfo.ACTION_CLICK);
@@ -173,9 +214,6 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
 
     }
 
-    /**
-     * 红包 钮
-     */
     private AccessibilityNodeInfo findOpenButton(AccessibilityNodeInfo node) {
         if (node == null)
             return null;
@@ -189,17 +227,15 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
         }
 
         //layout元素，遍历找button
+        AccessibilityNodeInfo button;
         for (int i = 0; i < node.getChildCount(); i++) {
-            AccessibilityNodeInfo button = findOpenButton(node.getChild(i));
+            button = findOpenButton(node.getChild(i));
             if (button != null)
                 return button;
         }
         return null;
     }
 
-    /**
-     * 节 信
-     */
     private void checkNodeInfo(int eventType) {
         if (this.rootNodeInfo == null) return;
 
@@ -211,7 +247,9 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
         /* 聊天会话窗口，遍历节点匹配“领取红包”和"查看红包" */
         AccessibilityNodeInfo node1 = (sharedPreferences.getBoolean("pref_watch_self", false)) ?
                 this.getTheLastNode(WECHAT_VIEW_OTHERS_CH, WECHAT_VIEW_SELF_CH) : this.getTheLastNode(WECHAT_VIEW_OTHERS_CH);
-        if (node1 != null && currentActivityName.contains(WECHAT_LUCKMONEY_GENERAL_ACTIVITY)) {
+        if (node1 != null &&
+                (currentActivityName.contains(WECHAT_LUCKMONEY_CHATTING_ACTIVITY)
+                        || currentActivityName.contains(WECHAT_LUCKMONEY_GENERAL_ACTIVITY))) {
             String excludeWords = sharedPreferences.getString("pref_watch_exclude_words", "");
             if (this.signature.generateSignature(node1, excludeWords)) {
                 mLuckyMoneyReceived = true;
@@ -257,43 +295,42 @@ public class HongbaoService extends AccessibilityService implements SharedPrefer
                 nodeToInput.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, arguments);
             }
         } catch (Exception e) {
-            // Not support
+            // Not supported
         }
     }
 
 
     private boolean hasOneOfThoseNodes(String... texts) {
+        List<AccessibilityNodeInfo> nodes;
         for (String text : texts) {
             if (text == null) continue;
 
-            List<AccessibilityNodeInfo> nodes = this.rootNodeInfo.findAccessibilityNodeInfosByText(text);
+            nodes = this.rootNodeInfo.findAccessibilityNodeInfosByText(text);
 
-            if (!nodes.isEmpty()) return true;
+            if (nodes != null && !nodes.isEmpty()) return true;
         }
         return false;
     }
 
     private AccessibilityNodeInfo getTheLastNode(String... texts) {
         int bottom = 0;
-        AccessibilityNodeInfo lastNode = null;
+        AccessibilityNodeInfo lastNode = null, tempNode;
+        List<AccessibilityNodeInfo> nodes;
 
         for (String text : texts) {
             if (text == null) continue;
 
-            List<AccessibilityNodeInfo> nodes = this.rootNodeInfo.findAccessibilityNodeInfosByText(text);
+            nodes = this.rootNodeInfo.findAccessibilityNodeInfosByText(text);
 
-            if (!nodes.isEmpty()) {
-                AccessibilityNodeInfo node = nodes.get(nodes.size() - 1);
+            if (nodes != null && !nodes.isEmpty()) {
+                tempNode = nodes.get(nodes.size() - 1);
+                if (tempNode == null) return null;
                 Rect bounds = new Rect();
-                node.getBoundsInScreen(bounds);
+                tempNode.getBoundsInScreen(bounds);
                 if (bounds.bottom > bottom) {
                     bottom = bounds.bottom;
-                    lastNode = node;
-                    if (text.equals(WECHAT_VIEW_OTHERS_CH)) {
-                        signature.others = true;
-                    } else {
-                        signature.others = false;
-                    }
+                    lastNode = tempNode;
+                    signature.others = text.equals(WECHAT_VIEW_OTHERS_CH);
                 }
             }
         }
